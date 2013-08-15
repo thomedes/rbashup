@@ -1,0 +1,355 @@
+#! /bin/bash
+##############################################################################
+#
+#   rbashup - rsync bash backup
+#
+#   Author:      Toni Homedes i Saun
+#   Copyright:   2013 Toni Homedes i Saun
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+##############################################################################
+
+#-----------------------------------------------------------------------------
+log() {
+    echo "@"
+}
+
+#-----------------------------------------------------------------------------
+ERROR() {
+    local s
+    for s in "" "ERROR:" "" "$@" ""; do echo "$s"; done >&2
+    kill -s TERM $TOP_PID
+}
+
+#-----------------------------------------------------------------------------
+WARNING() {
+    local s
+    for s in "$@"; do echo "WARNING: $s"; done >&2
+}
+
+#-----------------------------------------------------------------------------
+NOTICE() {
+    local s
+    for s in "$@"; do echo "NOTICE: $s"; done
+}
+
+#-----------------------------------------------------------------------------
+INFO() {
+    if ((opt_v > 0)); then
+	local s
+	for s in "$@"; do echo "INFO: $s"; done
+    fi
+}
+
+#-----------------------------------------------------------------------------
+DEBUG() {
+    if ((opt_v > 1)); then
+	local s
+	for s in "$@"; do echo "DEBUG: $s"; done
+    fi >&2
+}
+
+#-----------------------------------------------------------------------------
+version() {
+    echo $version
+}
+
+#-----------------------------------------------------------------------------
+usage() {
+    local s
+    IFS='' read -r -d '' s <<EOF
+
+Usage:
+    rbashup [options] backup-set
+
+
+EOF
+
+    if [[ $# > 0 ]]; then
+	ERROR "$@" "$s"
+    else
+	echo "$s"
+    fi
+}
+
+#-----------------------------------------------------------------------------
+#
+#   Compare two version strings
+#
+#   @param [in]     a           Version string to compare
+#   @param [in]     b           Version string to compare
+#
+#   Usage:
+#       version_cmp  1.2.3    4.5.6
+#       version_cmp  1.5.6.7  1.5.6
+#
+#   @return -1, 0 or 1
+#
+#-----------------------------------------------------------------------------
+version_cmp() {
+    local a="$1" b="$2"
+    local -i fa fb
+
+    while true; do
+
+	fa="${a%%.*}"
+	fb="${b%%.*}"
+
+	((fa != fb)) && break
+
+	a="${a#$fa}"; a="${a#.}"
+	b="${b#$fb}"; b="${b#.}"
+
+	if [[ -z $a && -z $b ]]; then
+	    echo 0
+	    return
+	fi
+    done
+    ((fa > fb)) && echo 1 || echo -1
+}
+
+#-----------------------------------------------------------------------------
+rsync_version() {
+    rsync --version | awk 'NR==1 { print $3 }'
+}
+
+#-----------------------------------------------------------------------------
+#
+#   receive a date in $date_format and return UNIX epoch seconds
+#
+#   @param  [in]    date        String to be parsed
+#
+#   @return UNIX epoch seconds for date
+#
+#-----------------------------------------------------------------------------
+epoch() {
+    date -d "${1:0:10} ${1:11:2}:${1:13}" +%s
+}
+
+#-----------------------------------------------------------------------------
+#
+#   Read a value from a .INI file
+#
+#   @param [in]     file        File to read
+#   @param [in]     section     Section to look at
+#   @param [in]     key         Name of parameter to return
+#   @param [in]     default     Value to return when there's no parameter
+#
+#   @return Read value or default
+#
+#-----------------------------------------------------------------------------
+ini_read() {
+    [[ $# -eq 4   ]] || ERROR "Invalid call to ini_read()"
+
+    local file=$1
+    local section=$2
+    local key=$3
+    local default=$4
+
+    [[ -r "$file" ]] || ERROR "Can't read from \"$file\""
+
+    DEBUG "ini_read $file $section $key $default"
+
+    local s=$(sed -n \
+	'/^[ \t]*\['"$section"'\]/,/\[/s/^[ \t]*'"$key"'[ \t]*=[ \t]*//p' \
+	$file)
+    [[ -z "$s" ]] && echo "$default" || echo "$s"
+}
+
+#-----------------------------------------------------------------------------
+#
+#   Read a whole INI section into a "variable" array
+#
+#   @param [out]    array       name of array where to store read values
+#   @param [in]     file        File to read
+#   @param [in]     section     Section to look at
+#
+#-----------------------------------------------------------------------------
+ini_read_section() {
+    [[ $# -eq 3   ]] || ERROR "Invalid call to ini_read_section"
+
+    local array="$1" file="$2" section="$3"
+
+    [[ -r "$file" ]] || ERROR "Can't read from \"$file\""
+
+    #DEBUG "ini_read_section $array $file $section"
+
+    for l in $(sed -n '/^[ \t]*\['"$section"'\]/,/\[/s/^[ \t]*\([^#; \t][^ \t=]*\).*=[ \t]*\(.*\)/\1=\2/p' $file)
+    do
+	local k=${l%%=*}
+	local v=${l#*=}
+	eval $array[$k]="$v"
+    done
+}
+
+#-----------------------------------------------------------------------------
+config_dump() {
+    local k kk
+    echo
+    echo Config:
+    echo
+    for k in "${!opts[@]}"; do echo "$k"; done | sort | while read kk; do
+	printf "%-20s ==> %s\n" "$kk" "${opts[$kk]}"; 
+    done
+    echo
+}
+
+#-----------------------------------------------------------------------------
+backup() {
+    local src="$1" dstbase="$2" now="$3"
+    shift 3
+
+    local \
+	dstfull="$dstbase/$now" \
+	latest="$dstbase/latest" \
+	tmp="$dstbase/.in-progress"
+
+    NOTICE "Backup \"$src\""
+    NOTICE "    to \"$dstfull\""
+
+    [[ -d "$dstfull" ]] && ERROR "Wait a minute!"
+
+    if [[ -d "$latest" ]]; then
+	local link="--link-dest=$latest/"
+    else
+	local link=
+    fi
+
+    [[ -z $opt_n ]] && rm -rf "$tmp" # just in case there was something left
+    
+    rsync $opt_n -a --exclude .git "$@" $link "$src/" "$tmp/" \
+	&& [[ -z $opt_n ]] \
+	&& mv "$tmp" "$dstfull" \
+	&& [[ -d "$latest" ]] && rm "$latest"
+    [[ ! -d "$latest" && -d "$dstfull" ]] && ln -s "$now" "$latest"
+}
+
+#-----------------------------------------------------------------------------
+purge() {
+    local path="$1"
+    local -i now=$(epoch "$2")
+
+    NOTICE "Purging old backups..."
+    INFO "Now is $2 ($now)"
+
+    local -i last_hourly last_daily last_weekly last_monthly 
+
+    (( last_hourly   = now -       3600 * ${opts[keep-hourly]}  ))
+    (( last_daily    = now -      86400 * ${opts[keep-daily]}   ))
+    (( last_weekly   = now -  7 * 86400 * ${opts[keep-weekly]}  ))
+    (( last_monthly  = now - 28 * 86400 * ${opts[keep-monthly]} ))
+
+    local -i last=0 count=0 e margin
+
+    for b in $(/bin/ls -dr "$path"/$mask)
+    do
+	e=$(epoch $(basename "$b"))
+	((last == 0)) && ((last = e))
+	((margin = last - e))
+
+#	DEBUG "e=$e margin=$margin last=$last"
+
+        # leave some margin for start time variance (-360, ...)
+
+	if ((   count < ${opts[keep-last]}
+	    || (e > last_hourly  && margin > (       3600 -  360 ))
+	    || (e > last_daily   && margin > (      86400 - 1800 ))
+	    || (e > last_weekly  && margin > ( 7 * (86400 - 8640)))
+	    || (e > last_monthly && margin > (30 * (86400 - 8640)))))
+	then
+	    INFO "Keeping  \"$b\""
+	    ((last = e))
+	else
+	    NOTICE "Removing \"$b\""
+	    [[ -z $opt_n ]] && rm -rf "$b"
+	    true
+	fi
+	((++count))
+    done
+}
+
+###########################################################################
+
+# If you change date_format you have to change epoch() and $mask
+# accordingly.
+
+date_format=+%Y-%m-%d_%H%M%z
+d=[0-9]
+d2=$d$d
+d4=$d2$d2
+mask="${d4}-${d2}-${d2}_${d4}[+-]${d4}"
+
+###########################################################################
+
+export TOP_PID=$$
+trap "exit 1" TERM
+#
+#   Do some checks
+#
+getopt -T > /dev/null
+if [[ $? -ne 4 ]]; then
+    ERROR "Invalid version of getopt. Enhanced GNU version required"
+fi
+
+if [[ $(version_cmp $(rsync_version) 2.5.7) -lt 0 ]]; then
+    ERROR "Invalid version of rsync. 2.5.7 or more required"
+fi
+#
+#   Parse options
+#
+opt_n=
+opt_v=0
+opt_config=
+
+eval set -- $(getopt -n $(basename "$0") -o f:hnVv \
+    -l config,help,version -- "$@")
+
+while true; do
+    case "$1" in
+	-V|--version)   version; exit 0;;
+	-f|--config)    opt_config="$2"; shift;;
+	-h|--help)      usage; exit 0;;
+	-n)             opt_n="-n";;
+	-v)             ((++opt_v));;
+	--)	        shift; break;;
+	*)              ERROR "Undefined parameter '$1'"
+    esac
+    shift
+done
+
+[[ $# -lt 1 ]] && ERROR "Missing backup set name"
+opt_set="$1"; shift
+
+declare -A opts
+ini_read_section opts "$opt_config" global
+ini_read_section opts "$opt_config" "$opt_set"
+
+now=$(date $date_format)
+
+INFO "rbashup started on $now"
+
+((opt_v > 0)) && config_dump
+
+[[ -n $opt_n ]] && NOTICE "DRY RUN"
+
+# Do the backup
+
+dstbase="${opts[dst]}/$opt_set"
+dstfull="$dstbase/$now"
+latest="$dstbase/latest"
+
+[[ -z $opt_n ]] && mkdir -p "$dstbase"
+#backup "${opts[src]}" "$dstbase" "$now"
+purge "$dstbase" "$now"
