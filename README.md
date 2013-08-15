@@ -16,7 +16,7 @@ Description
 *rbashup* is another rsync incremental backup utility. It is inspired in 
 *rsnapshot* but with some changes:
 
-===Design objectives
+### Design objectives
 
  *  KISS; should work out of the box in most GNU boxes, no need to install
     nothing special
