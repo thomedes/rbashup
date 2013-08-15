@@ -351,5 +351,5 @@ dstfull="$dstbase/$now"
 latest="$dstbase/latest"
 
 [[ -z $opt_n ]] && mkdir -p "$dstbase"
-#backup "${opts[src]}" "$dstbase" "$now"
+backup "${opts[src]}" "$dstbase" "$now"
 purge "$dstbase" "$now"
