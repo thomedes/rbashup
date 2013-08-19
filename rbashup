@@ -28,7 +28,9 @@ log() {
     local msg="$(printf "%s %s: $format\n" "$now" "$priority" "$@")"
 
     if [[ -x ${opts[logger]} ]]; then
-	${opts[logger]} -p "${opts[logger-facility]}.$priority" -t rbashup "$msg"
+	${opts[logger]} \
+	    -p "${opts[logger-facility]}.$priority" \
+	    -t rbashup "$msg"
     else if [[ -n ${opts[log-file]} ]]; then
 	echo "$msg" >> "${opts[log-file]}"
     else
@@ -76,6 +78,13 @@ usage() {
     IFS='' read -r -d '' s <<EOF
 Usage:
     rbashup [options] backup-set
+
+    where options are:
+	-V|--version        show version number and exit
+	-c|--config file    use given config file
+	-h|--help           show this message and exit
+	-n                  Dry Run, don't actually do nothing
+	-v                  verbose, use 1 or more times
 EOF
 
     if [[ $# > 0 ]]; then
@@ -340,13 +349,22 @@ done
 opt_set="$1"; shift
 
 declare -A opts
+opts[log-file]=/var/log/rbashup.log
+opts[lock-file]=/var/run/rbashup.pid
+
 ini_read_section opts "$opt_config" global
 ini_read_section opts "$opt_config" "$opt_set"
 
 now=$(date $date_format)
 
-NOTICE "****** rbashup started ******"
+NOTICE "****** rbashup started (pid $$) ******"
 NOTICE "****** backup-set: $opt_set ******"
+
+#  Check if already running
+lock_id=$(< ${opts[lock-file]})
+if ((lock_id > 0)) && ps -p "$lock_id" > /dev/null; then
+    ERROR "rbashup is already running (pid $lock_id)!"
+fi
 
 DEBUG "%s" "$(config_dump)"
 
@@ -362,3 +380,4 @@ latest="$dstbase/latest"
 backup "${opts[src]}" "$dstbase" "$now" "${opts[excludes]}"
 purge "$dstbase" "$now"
 NOTICE "******* rbashup ended *******"
+rm "${opts[lock-file]}"
