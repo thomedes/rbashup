@@ -23,42 +23,46 @@
 
 #-----------------------------------------------------------------------------
 log() {
-    echo "@"
+    local priority="$1" format="$2"; shift 2
+    local now=$(date --rfc-3339=seconds)
+    local msg="$(printf "%s %s: $format\n" "$now" "$priority" "$@")"
+
+    if [[ -x ${opts[logger]} ]]; then
+	${opts[logger]} -p "${opts[logger-facility]}.$priority" -t rbashup "$msg"
+    else if [[ -n ${opts[log-file]} ]]; then
+	echo "$msg" >> "${opts[log-file]}"
+    else
+	case "$priority" in
+	    WARNING|ERROR)  echo "$msg" >&2 ;;
+	    *)              echo "$msg"     ;;
+	esac
+    fi fi
 }
 
 #-----------------------------------------------------------------------------
 ERROR() {
-    local s
-    for s in "" "ERROR:" "" "$@" ""; do echo "$s"; done >&2
+    log ERROR "$@"
     kill -s TERM $TOP_PID
 }
 
 #-----------------------------------------------------------------------------
 WARNING() {
-    local s
-    for s in "$@"; do echo "WARNING: $s"; done >&2
+    log WARNING "$@"
 }
 
 #-----------------------------------------------------------------------------
 NOTICE() {
-    local s
-    for s in "$@"; do echo "NOTICE: $s"; done
+    log NOTICE "$@"
 }
 
 #-----------------------------------------------------------------------------
 INFO() {
-    if ((opt_v > 0)); then
-	local s
-	for s in "$@"; do echo "INFO: $s"; done
-    fi
+    ((opt_v > 0)) && log INFO "$@"
 }
 
 #-----------------------------------------------------------------------------
 DEBUG() {
-    if ((opt_v > 1)); then
-	local s
-	for s in "$@"; do echo "DEBUG: $s"; done
-    fi >&2
+    ((opt_v > 1)) && log DEBUG "$@"
 }
 
 #-----------------------------------------------------------------------------
@@ -70,15 +74,13 @@ version() {
 usage() {
     local s
     IFS='' read -r -d '' s <<EOF
-
 Usage:
     rbashup [options] backup-set
-
-
 EOF
 
     if [[ $# > 0 ]]; then
-	ERROR "$@" "$s"
+	local fmt="$1"; shift
+	ERROR "$fmt\n\n%s" "$@" "$s"
     else
 	echo "$s"
     fi
@@ -158,9 +160,9 @@ ini_read() {
     local key=$3
     local default=$4
 
-    [[ -r "$file" ]] || ERROR "Can't read from \"$file\""
+    [[ -r "$file" ]] || ERROR "Can't read from \"%s\"" "$file"
 
-    DEBUG "ini_read $file $section $key $default"
+    DEBUG "ini_read %s %s %s %s" "$file" "$section" "$key" "$default"
 
     local s=$(sed -n \
 	'/^[ \t]*\['"$section"'\]/,/\[/s/^[ \t]*'"$key"'[ \t]*=[ \t]*//p' \
@@ -182,7 +184,7 @@ ini_read_section() {
 
     local array="$1" file="$2" section="$3"
 
-    [[ -r "$file" ]] || ERROR "Can't read from \"$file\""
+    [[ -r "$file" ]] || ERROR "Can't read from \"%s\"" "$file"
 
     #DEBUG "ini_read_section $array $file $section"
 
@@ -208,13 +210,17 @@ config_dump() {
 
 #-----------------------------------------------------------------------------
 backup() {
-    local src="$1" dstbase="$2" now="$3"
-    shift 3
+    local src="$1" dstbase="$2" now="$3" excludes="$4"
+    shift 4
 
     local \
 	dstfull="$dstbase/$now" \
 	latest="$dstbase/latest" \
 	tmp="$dstbase/.in-progress"
+
+    if [[ -n $excludes ]]; then
+	excludes=$(echo ",$excludes" | sed 's/[,]/ --exclude-from=/g')
+    fi
 
     NOTICE "Backup \"$src\""
     NOTICE "    to \"$dstfull\""
@@ -229,7 +235,7 @@ backup() {
 
     [[ -z $opt_n ]] && rm -rf "$tmp" # just in case there was something left
     
-    rsync $opt_n -a --exclude .git "$@" $link "$src/" "$tmp/" \
+    rsync $opt_n -a $excludes "$@" $link "$src/" "$tmp/" \
 	&& [[ -z $opt_n ]] \
 	&& mv "$tmp" "$dstfull" \
 	&& [[ -d "$latest" ]] && rm "$latest"
@@ -253,7 +259,7 @@ purge() {
 
     local -i last=0 count=0 e margin
 
-    for b in $(/bin/ls -dr "$path"/$mask)
+    for b in $(/bin/ls -dr "$path"/$mask 2>&-)
     do
 	e=$(epoch $(basename "$b"))
 	((last == 0)) && ((last = e))
@@ -311,7 +317,8 @@ fi
 #
 opt_n=
 opt_v=0
-opt_config=
+opt_config=~/.rbashup
+[[ -f $opt_config ]] || opt_config=/etc/rbashup.cfg
 
 eval set -- $(getopt -n $(basename "$0") -o f:hnVv \
     -l config,help,version -- "$@")
@@ -319,17 +326,17 @@ eval set -- $(getopt -n $(basename "$0") -o f:hnVv \
 while true; do
     case "$1" in
 	-V|--version)   version; exit 0;;
-	-f|--config)    opt_config="$2"; shift;;
+	-c|--config)    opt_config="$2"; shift;;
 	-h|--help)      usage; exit 0;;
 	-n)             opt_n="-n";;
 	-v)             ((++opt_v));;
 	--)	        shift; break;;
-	*)              ERROR "Undefined parameter '$1'"
+	*)              ERROR "Undefined parameter '%s'" "$1"
     esac
     shift
 done
 
-[[ $# -lt 1 ]] && ERROR "Missing backup set name"
+[[ $# -lt 1 ]] && usage "Missing backup set name"
 opt_set="$1"; shift
 
 declare -A opts
@@ -338,9 +345,10 @@ ini_read_section opts "$opt_config" "$opt_set"
 
 now=$(date $date_format)
 
-INFO "rbashup started on $now"
+NOTICE "****** rbashup started ******"
+NOTICE "****** backup-set: $opt_set ******"
 
-((opt_v > 0)) && config_dump
+DEBUG "%s" "$(config_dump)"
 
 [[ -n $opt_n ]] && NOTICE "DRY RUN"
 
@@ -351,5 +359,6 @@ dstfull="$dstbase/$now"
 latest="$dstbase/latest"
 
 [[ -z $opt_n ]] && mkdir -p "$dstbase"
-backup "${opts[src]}" "$dstbase" "$now"
+backup "${opts[src]}" "$dstbase" "$now" "${opts[excludes]}"
 purge "$dstbase" "$now"
+NOTICE "******* rbashup ended *******"
