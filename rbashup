@@ -3,6 +3,8 @@
 #
 #   rbashup - rsync bash backup
 #
+    version=0.0.1
+#
 #   Author:      Toni Homedes i Saun
 #   Copyright:   2013 Toni Homedes i Saun
 #
@@ -19,6 +21,13 @@
 #   You should have received a copy of the GNU General Public License
 #   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
+#
+#   Release log:
+#
+#   v0.0.1 => The purging algorithm in v0.0.0 was plain wrong. I'm rewriting
+#   it with a new idea, the "bucket filter" => done, not very happy about the
+#   result, it works well but code should be cleaner
+#   
 ##############################################################################
 
 #-----------------------------------------------------------------------------
@@ -151,39 +160,9 @@ epoch() {
 
 #-----------------------------------------------------------------------------
 #
-#   Read a value from a .INI file
-#
-#   @param [in]     file        File to read
-#   @param [in]     section     Section to look at
-#   @param [in]     key         Name of parameter to return
-#   @param [in]     default     Value to return when there's no parameter
-#
-#   @return Read value or default
-#
-#-----------------------------------------------------------------------------
-ini_read() {
-    [[ $# -eq 4   ]] || ERROR "Invalid call to ini_read()"
-
-    local file=$1
-    local section=$2
-    local key=$3
-    local default=$4
-
-    [[ -r "$file" ]] || ERROR "Can't read from \"%s\"" "$file"
-
-    DEBUG "ini_read %s %s %s %s" "$file" "$section" "$key" "$default"
-
-    local s=$(sed -n \
-	'/^[ \t]*\['"$section"'\]/,/\[/s/^[ \t]*'"$key"'[ \t]*=[ \t]*//p' \
-	$file)
-    [[ -z "$s" ]] && echo "$default" || echo "$s"
-}
-
-#-----------------------------------------------------------------------------
-#
 #   Read a whole INI section into a "variable" array
 #
-#   @param [out]    array       name of array where to store read values
+#   @param [out]    array       name of array to receive read values
 #   @param [in]     file        File to read
 #   @param [in]     section     Section to look at
 #
@@ -192,6 +171,7 @@ ini_read_section() {
     [[ $# -eq 3   ]] || ERROR "Invalid call to ini_read_section"
 
     local array="$1" file="$2" section="$3"
+    local l k v
 
     [[ -r "$file" ]] || ERROR "Can't read from \"%s\"" "$file"
 
@@ -199,8 +179,8 @@ ini_read_section() {
 
     for l in $(sed -n '/^[ \t]*\['"$section"'\]/,/\[/s/^[ \t]*\([^#; \t][^ \t=]*\).*=[ \t]*\(.*\)/\1=\2/p' $file)
     do
-	local k=${l%%=*}
-	local v=${l#*=}
+	k=${l%%=*}
+	v=${l#*=}
 	eval $array[$k]="$v"
     done
 }
@@ -254,45 +234,87 @@ backup() {
 #-----------------------------------------------------------------------------
 purge() {
     local path="$1"
-    local -i now=$(epoch "$2")
+    local x y list
+    local -i i j now=$(epoch "$2")
+    local -A backups
 
     NOTICE "Purging old backups..."
     INFO "Now is $2 ($now)"
 
-    local -i last_hourly last_daily last_weekly last_monthly 
+    ((now = now + 0 * 3600))
 
-    (( last_hourly   = now -       3600 * ${opts[keep-hourly]}  ))
-    (( last_daily    = now -      86400 * ${opts[keep-daily]}   ))
-    (( last_weekly   = now -  7 * 86400 * ${opts[keep-weekly]}  ))
-    (( last_monthly  = now - 28 * 86400 * ${opts[keep-monthly]} ))
+    # load an array with all existing backups
+    list="$(find "$path" -mindepth 1 -maxdepth 1 -type d -name "$mask" | 
+            sort -r)"
 
-    local -i last=0 count=0 e margin
+    while read x; do backups["$x"]=0; done < <(echo "$list")
 
-    for b in $(/bin/ls -dr "$path"/$mask 2>&-)
-    do
-	e=$(epoch $(basename "$b"))
-	((last == 0)) && ((last = e))
-	((margin = last - e))
+    #for x in "${!backups[@]}"; do echo "x = $x"; done
 
-#	DEBUG "e=$e margin=$margin last=$last"
+    # Mark first "keep-last" for keeping
+    ((i = 0))
+    while read x && ((i++ < ${opts[keep-last]})); do 
+	backups["$x"]=1;
+    done < <(echo "$list")
 
-        # leave some margin for start time variance (-360, ...)
+    # Mark hourly
+    periods=${opts[keep-hourly]}
+    ((last_period = periods))
+    while read x; do
+	e=$(epoch $(basename "$x"))
+	((period = (now - e) / 3600))
+	if ((period < last_period)); then
+	    ((last_period = period))
+	    backups["$x"]=1;
+	fi
+    done < <(echo "$list" | sort) # run from past to present
 
-	if ((   count < ${opts[keep-last]}
-	    || (e > last_hourly  && margin > (       3600 -  360 ))
-	    || (e > last_daily   && margin > (      86400 - 1800 ))
-	    || (e > last_weekly  && margin > ( 7 * (86400 - 8640)))
-	    || (e > last_monthly && margin > (30 * (86400 - 8640)))))
-	then
-	    INFO "Keeping  \"$b\""
-	    ((last = e))
+    # Mark daily
+    periods=${opts[keep-daily]}
+    ((last_period = periods))
+    while read x; do
+	e=$(epoch $(basename "$x"))
+	((period = (now - e) / 86400))
+	if ((period < last_period)); then
+	    ((last_period = period))
+	    backups["$x"]=1;
+	fi
+    done < <(echo "$list" | sort) # run from past to present
+
+    # Mark weekly
+    periods=${opts[keep-weekly]}
+    ((last_period = periods))
+    while read x; do
+	e=$(epoch $(basename "$x"))
+	((period = (now - e) / (7 * 86400) ))
+	if ((period < last_period)); then
+	    ((last_period = period))
+	    backups["$x"]=1;
+	fi
+    done < <(echo "$list" | sort) # run from past to present
+
+    # Mark monthly
+    periods=${opts[keep-monthly]}
+    ((last_period = periods))
+    while read x; do
+	e=$(epoch $(basename "$x"))
+	((period = (now - e) / (30 * 86400) ))
+	if ((period < last_period)); then
+	    ((last_period = period))
+	    backups["$x"]=1;
+	fi
+    done < <(echo "$list" | sort) # run from past to present
+
+    while read x; do 
+	#echo "$x => ${backups["$x"]}"; 
+	if ((${backups["$x"]})); then
+	    INFO "Keeping  \"$x\""
 	else
-	    NOTICE "Removing \"$b\""
-	    [[ -z $opt_n ]] && rm -rf "$b"
+	    NOTICE "Removing \"$x\""
+	    [[ -z $opt_n ]] && rm -rf "$x"
 	    true
 	fi
-	((++count))
-    done
+    done < <(echo "$list")
 }
 
 ###########################################################################
@@ -361,10 +383,11 @@ NOTICE "****** rbashup started (pid $$) ******"
 NOTICE "****** backup-set: $opt_set ******"
 
 #  Check if already running
-lock_id=$(< ${opts[lock-file]})
+[[ -f ${opts[lock-file]} ]] && lock_id=$(< ${opts[lock-file]}) || lock_id=0
 if ((lock_id > 0)) && ps -p "$lock_id" > /dev/null; then
     ERROR "rbashup is already running (pid $lock_id)!"
 fi
+echo $$ > "${opts[lock-file]}"
 
 DEBUG "%s" "$(config_dump)"
 
