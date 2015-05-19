@@ -233,7 +233,7 @@ purge() {
 
     local path="$1"
     local x y list
-    local -i e i j now=$(epoch "$2")
+    local -i e i j period last_period n_periods now=$(epoch "$2")
     local -A backups
 
     NOTICE "Purging old backups..."
@@ -253,8 +253,8 @@ purge() {
     done < <(echo "$list")
 
     # Mark hourly
-    periods=${opts[keep-hourly]}
-    ((last_period = periods))
+    n_periods=${opts[keep-hourly]}
+    ((last_period = n_periods))
     while read x; do
         e=$(epoch $(basename "$x"))
         ((period = (now - e) / 3600))
@@ -265,8 +265,8 @@ purge() {
     done < <(echo "$list" | sort) # run from past to present
 
     # Mark daily
-    periods=${opts[keep-daily]}
-    ((last_period = periods))
+    n_periods=${opts[keep-daily]}
+    ((last_period = n_periods))
     while read x; do
         e=$(epoch $(basename "$x"))
         ((period = (now - e) / 86400))
@@ -277,8 +277,8 @@ purge() {
     done < <(echo "$list" | sort) # run from past to present
 
     # Mark weekly
-    periods=${opts[keep-weekly]}
-    ((last_period = periods))
+    n_periods=${opts[keep-weekly]}
+    ((last_period = n_periods))
     while read x; do
         e=$(epoch $(basename "$x"))
         ((period = (now - e) / (7 * 86400) ))
@@ -289,8 +289,8 @@ purge() {
     done < <(echo "$list" | sort) # run from past to present
 
     # Mark monthly
-    periods=${opts[keep-monthly]}
-    ((last_period = periods))
+    n_periods=${opts[keep-monthly]}
+    ((last_period = n_periods))
     while read x; do
         e=$(epoch $(basename "$x"))
         ((period = (now - e) / (30 * 86400) ))
